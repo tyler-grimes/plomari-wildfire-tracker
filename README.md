@@ -20,8 +20,11 @@ clearly marked spread-scenario tool.
 ## What the map shows
 
 - The latest sourced 112 instruction and Fire Service response update.
-- Approximate NASA FIRMS VIIRS/MODIS thermal pixels from the cited satellite
-  passes. These are **not** a mapped fire edge.
+- Near-real-time NASA FIRMS VIIRS/MODIS thermal pixels for the whole of
+  Lesvos, pulled server-side and refreshed every 5 minutes while the page is
+  open. Each pixel shows its acquisition time in Greece local time. These are
+  approximate thermal pixels, **not** a mapped fire edge. If the live feed is
+  unavailable, a clearly labeled 29 July snapshot is shown instead.
 - Source-labeled local reports, with official, observed, reported, and modeled
   information visually distinguished.
 - Open-Meteo wind at 10 m, 80 m, 120 m, and 180 m above ground for the incident
@@ -43,7 +46,7 @@ or user-specific status in this repository.
 | Detailed wind | Every 5 minutes while the page is open | Open-Meteo model cycles update less often | Point forecast/model, not an on-site anemometer |
 | LGMT METAR | Every 5 minutes through the server route | Usually observed about every 30 minutes; provider cache updates about once a minute | Airport is not the fireground; terrain can produce very different local wind |
 | Smoke envelope | Recomputed whenever wind data or the selected horizon changes | Derived from the current 10 m model wind | Not observed smoke, PM2.5, or a dispersion model |
-| NASA FIRMS points | Static snapshot in this release | FIRMS services update roughly every 15 minutes after satellite processing | New points require a new overpass and can arrive roughly 1–3 hours later; a free FIRMS `MAP_KEY` is needed for a live service integration |
+| NASA FIRMS points | Every 5 minutes while the page is open (server cache ≈2 min) | FIRMS services update roughly every 15 minutes after satellite processing | New points require a new satellite overpass and can arrive roughly 1–3 hours after the pass; requires `FIRMS_MAP_KEY` (falls back to a labeled 29 July snapshot without it) |
 | Official/local incident timeline | Manually curated in this release | Depends on the source publisher | Always check 112 and local authorities directly |
 
 Every live data panel exposes its model/observation time. If live wind retrieval
@@ -56,6 +59,7 @@ the failure is visible rather than silently presenting it as current.
 - [Greek Civil Protection guidance](https://civilprotection.gov.gr/112/odigies-prostasias)
 - [Hellenic Fire Service](https://x.com/pyrosvestiki/status/2082459852350066823)
 - [NASA FIRMS thermal-data description](https://firms.modaps.eosdis.nasa.gov/content/descriptions/FIRMS_VIIRS_Firehotspots.html)
+- [NASA FIRMS area API](https://firms.modaps.eosdis.nasa.gov/api/area/)
 - [NASA FIRMS WMS documentation](https://firms.modaps.eosdis.nasa.gov/mapserver/wms-info/)
 - [Open-Meteo forecast API](https://open-meteo.com/en/docs)
 - [AviationWeather API](https://aviationweather.gov/data/api/)
@@ -71,6 +75,7 @@ Requirements: Node.js 20.9 or newer.
 
 ```bash
 npm install
+cp .env.example .env.local   # then paste your FIRMS map key
 npm run dev
 ```
 
@@ -84,30 +89,60 @@ npm run build
 npm start
 ```
 
-No environment variables are required for the current release.
+## Environment variables
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `FIRMS_MAP_KEY` | Recommended | Server-side key for the NASA FIRMS area API used by `/api/firms`. Without it the app still runs, but the thermal layer shows a labeled static snapshot instead of live detections. Request a free key at <https://firms.modaps.eosdis.nasa.gov/api/map_key/>. |
+
+The key is read only inside the server route. Never expose it with a
+`NEXT_PUBLIC_` prefix, and never commit `.env.local` (the `.gitignore`
+already excludes it).
 
 ## Deploy to Vercel
 
 1. Import this GitHub repository in Vercel.
 2. Keep the detected framework as **Next.js**.
 3. Use the default build command (`npm run build`) and output settings.
-4. Deploy. No environment variables are needed.
+4. Add the `FIRMS_MAP_KEY` environment variable (Settings → Environment
+   Variables) for Production, Preview, and Development.
+5. Deploy.
 
-The `/api/wind` route fetches Open-Meteo and AviationWeather data server-side,
-so the browser does not need cross-origin access to the upstream services.
-Vercel may cache a successful response for up to five minutes.
+The `/api/wind` and `/api/firms` routes fetch Open-Meteo, AviationWeather,
+and NASA FIRMS data server-side, so the browser does not need cross-origin
+access to the upstream services and the FIRMS key never reaches the client.
+Vercel may cache a successful wind response for up to five minutes and a
+FIRMS response for about two minutes.
 
 ## Project structure
 
 ```text
 app/
-  api/wind/route.ts  # normalized model wind and LGMT METAR
-  globals.css        # responsive tactical interface
-  layout.tsx         # metadata and document shell
-  page.tsx           # Leaflet map, layers, timeline, and scenarios
+  api/firms/route.ts  # live NASA FIRMS VIIRS/MODIS detections for Lesvos
+  api/wind/route.ts   # normalized model wind and LGMT METAR
+  globals.css         # responsive tactical interface
+  layout.tsx          # metadata and document shell
+  page.tsx            # Leaflet map, layers, timeline, and scenarios
 public/
   favicon.svg
+.env.example          # documents FIRMS_MAP_KEY for new developers
 ```
+
+## Notes for developers taking this over
+
+- All timestamps shown in the interface are Greece local time
+  (`Europe/Athens`), formatted client-side from ISO/UTC values returned by
+  the API routes.
+- Client polling cadence is 5 minutes for both `/api/wind` and `/api/firms`;
+  the header clock ticks every second.
+- Live-data panels display their model/observation time and degrade
+  visibly (stale/snapshot labels) instead of failing silently.
+- The incident timeline (`intel` in `app/page.tsx`) and the static
+  fallback detections are manually curated and dated 29 July 2026; update or
+  retire them as the situation evolves.
+- The confidence taxonomy (official / observed / reported / modeled) is
+  load-bearing across the UI — keep new layers labeled with a source and a
+  freshness time.
 
 ## Design attribution
 

@@ -78,8 +78,28 @@ type ThermalDetection = {
   sensor: string;
   pass: string;
   confidence: string;
-  frp: number;
+  frp: number | null;
   footprint: string;
+};
+
+type FirmsDetection = {
+  id: string;
+  lat: number;
+  lon: number;
+  acquiredAt: string;
+  sensor: string;
+  source: string;
+  confidence: string;
+  frp: number | null;
+  footprint: string;
+  daynight: "day" | "night" | null;
+};
+
+type FirmsPayload = {
+  generatedAt: string;
+  configured: boolean;
+  detections: FirmsDetection[];
+  errors: string[];
 };
 
 const INCIDENT: LatLngTuple = [38.989013, 26.382489];
@@ -118,7 +138,9 @@ const LANDFILL_FOOTPRINT: LatLngTuple[] = [
   [38.9895777, 26.3815427],
 ];
 
-const THERMAL_DETECTIONS: ThermalDetection[] = [
+// Labeled fallback only: the 29 July 2026 afternoon passes. The map renders
+// live NASA FIRMS detections from /api/firms whenever the feed is available.
+const SNAPSHOT_DETECTIONS: ThermalDetection[] = [
   {
     id: "snpp-1",
     point: [38.99092, 26.38489],
@@ -365,7 +387,7 @@ const sources = [
   {
     label: "NASA FIRMS",
     href: "https://firms.modaps.eosdis.nasa.gov/content/descriptions/FIRMS_VIIRS_Firehotspots.html",
-    kind: "Thermal data interpretation",
+    kind: "Live thermal hotspots · 5-min poll",
   },
   {
     label: "Open-Meteo",
@@ -517,10 +539,12 @@ export default function Home() {
   const [activeIntel, setActiveIntel] = useState("overnight-hotspots");
   const [windData, setWindData] = useState<WindPayload | null>(null);
   const [windError, setWindError] = useState(false);
+  const [firmsData, setFirmsData] = useState<FirmsPayload | null>(null);
+  const [firmsError, setFirmsError] = useState(false);
   const [online, setOnline] = useState(true);
   const [layers, setLayers] = useState<Record<LayerKey, boolean>>({
     official: true,
-    satellite: false,
+    satellite: true,
     local: true,
     wind: true,
     smoke: true,
@@ -546,6 +570,40 @@ export default function Home() {
   );
   const windObservedTime = formatGreeceTime(fireWind.time);
   const retrievedTime = formatGreeceTime(windData?.generatedAt);
+
+  const liveDetections = useMemo(
+    () => (firmsData?.configured ? firmsData.detections : []),
+    [firmsData],
+  );
+  const usingLiveThermal = liveDetections.length > 0;
+  const thermalDetections: ThermalDetection[] = useMemo(() => {
+    if (!usingLiveThermal) return SNAPSHOT_DETECTIONS;
+    return liveDetections.map((detection) => ({
+      id: detection.id,
+      point: [detection.lat, detection.lon] as LatLngTuple,
+      sensor: detection.sensor,
+      pass: formatGreeceTime(detection.acquiredAt),
+      confidence:
+        detection.confidence.charAt(0).toUpperCase() +
+        detection.confidence.slice(1),
+      frp: detection.frp,
+      footprint: detection.footprint,
+    }));
+  }, [usingLiveThermal, liveDetections]);
+  const latestThermalTime = usingLiveThermal
+    ? formatGreeceTime(liveDetections[0]?.acquiredAt)
+    : "16:06";
+  const thermalStatus = usingLiveThermal
+    ? firmsError
+      ? "LIVE / RETRYING"
+      : "LIVE"
+    : firmsData && !firmsData.configured
+      ? "KEY NOT SET"
+      : firmsData && firmsData.errors.length > 0
+        ? "FEED ERROR / SNAPSHOT"
+        : firmsError
+          ? "SNAPSHOT / RETRYING"
+          : "SNAPSHOT";
 
   useEffect(() => {
     const format = () =>
@@ -602,6 +660,30 @@ export default function Home() {
     };
     const initial = window.setTimeout(() => void refreshWind(), 0);
     const timer = window.setInterval(() => void refreshWind(), 300_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshFirms = async () => {
+      try {
+        const response = await fetch("/api/firms", { cache: "no-store" });
+        if (!response.ok) throw new Error("firms request failed");
+        const payload = (await response.json()) as FirmsPayload;
+        if (!cancelled) {
+          setFirmsData(payload);
+          setFirmsError(false);
+        }
+      } catch {
+        if (!cancelled) setFirmsError(true);
+      }
+    };
+    const initial = window.setTimeout(() => void refreshFirms(), 0);
+    const timer = window.setInterval(() => void refreshFirms(), 300_000);
     return () => {
       cancelled = true;
       window.clearTimeout(initial);
@@ -761,9 +843,12 @@ export default function Home() {
     }
 
     if (layers.satellite) {
-      THERMAL_DETECTIONS.forEach((detection) => {
+      const feedLabel = usingLiveThermal
+        ? "Live NASA FIRMS"
+        : "Snapshot · 29 Jul afternoon passes";
+      thermalDetections.forEach((detection) => {
         const high =
-          detection.confidence === "High" || detection.frp >= 30;
+          detection.confidence === "High" || (detection.frp ?? 0) >= 30;
         L.circleMarker(detection.point, {
           radius: high ? 7 : 5,
           color: high ? "#ff3b24" : "#ff9f1c",
@@ -772,7 +857,7 @@ export default function Home() {
           fillOpacity: high ? 0.72 : 0.52,
         })
           .bindPopup(
-            `<div class="popup-copy"><strong>${detection.sensor}</strong><br>${detection.pass} Greece · ${detection.confidence}<br>FRP ${detection.frp.toFixed(2)} MW<br><span>Nominal pixel ${detection.footprint} · not a perimeter</span></div>`,
+            `<div class="popup-copy"><strong>${detection.sensor}</strong><br>${detection.pass} Greece · ${detection.confidence}<br>FRP ${detection.frp === null ? "—" : `${detection.frp.toFixed(2)} MW`}<br><span>${feedLabel} · pixel ${detection.footprint} · not a perimeter</span></div>`,
           )
           .addTo(group);
       });
@@ -942,6 +1027,8 @@ export default function Home() {
     downwindHeading,
     smokeDistance,
     smokeMinutes,
+    thermalDetections,
+    usingLiveThermal,
   ]);
 
   const toggleLayer = (key: LayerKey) => {
@@ -1075,8 +1162,10 @@ export default function Home() {
                 key: "satellite" as LayerKey,
                 icon: "✦",
                 label: "Thermal detections",
-                detail: "NASA FIRMS · latest 16:06",
-                count: "15",
+                detail: usingLiveThermal
+                  ? `NASA FIRMS live · latest ${latestThermalTime} · polls 5 min`
+                  : `NASA FIRMS ${thermalStatus.toLowerCase()} · latest ${latestThermalTime}`,
+                count: String(thermalDetections.length),
               },
               {
                 key: "local" as LayerKey,
@@ -1327,9 +1416,15 @@ export default function Home() {
           <small>Latest 112 instruction 16:58 · reviewed 22:00</small>
         </div>
         <div>
-          <span>THERMAL</span>
-          <strong>15 SNAPSHOT PIXELS</strong>
-          <small>Latest pass 16:06 · layer off by default</small>
+          <span>THERMAL · {thermalStatus}</span>
+          <strong>
+            {thermalDetections.length} {usingLiveThermal ? "LIVE" : "SNAPSHOT"}{" "}
+            PIXELS
+          </strong>
+          <small>
+            Latest pass {latestThermalTime} Greece ·{" "}
+            {usingLiveThermal ? "auto-refresh 5 min" : "live feed unavailable"}
+          </small>
         </div>
         <div>
           <span>FIRE-GRID MODEL · {windObservedTime}</span>
